@@ -1,0 +1,382 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Crime Analysis
+# MAGIC ### Load File
+
+# COMMAND ----------
+
+# File location and type
+file_location = "/FileStore/tables/Crimes___2001_to_Present.csv"
+file_type = "csv"
+
+# CSV options
+infer_schema = "false"
+first_row_is_header = "true"
+delimiter = ","
+
+# The applied options are for CSV files. For other file types, these will be ignored.
+crime = spark.read.format(file_type) \
+  .option("inferSchema", infer_schema) \
+  .option("header", first_row_is_header) \
+  .option("sep", delimiter) \
+  .load(file_location)
+
+# File location and type
+file_location = "/FileStore/tables/CommAreas.csv"
+file_type = "csv"
+
+# CSV options
+infer_schema = "false"
+first_row_is_header = "true"
+delimiter = ","
+
+# The applied options are for CSV files. For other file types, these will be ignored.
+comm = spark.read.format(file_type) \
+  .option("inferSchema", infer_schema) \
+  .option("header", first_row_is_header) \
+  .option("sep", delimiter) \
+  .load(file_location)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Import Libraries
+
+# COMMAND ----------
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from pyspark.sql.functions import *
+from pyspark import SparkConf
+from pyspark import SparkContext as sc
+from pyspark.sql import SQLContext
+
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+from pyspark.ml.classification import DecisionTreeClassifier
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.feature import OneHotEncoder, StringIndexer
+from pyspark.sql.types import *
+from pyspark.ml.classification import RandomForestClassifier
+from pyspark.ml import Pipeline
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, multilabel_confusion_matrix
+
+import os
+import dash
+from dash import Dash, html, dash_table, dcc, callback
+from dash.dependencies import Output, Input
+
+import warnings
+warnings.filterwarnings("ignore")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Crime Analysis
+
+# COMMAND ----------
+
+print("Crime DF count - before dropping NA values", crime.count())
+crime = crime.na.drop()
+print("Crime DF count - after dropping NA values", crime.count())
+
+# COMMAND ----------
+
+crime = crime.select('Date', 'Primary Type', 'Arrest', 'Domestic', 'District', 'Community Area', 'Year')
+crime.printSchema()
+
+# COMMAND ----------
+
+# Tran date column into timeframe
+crime = crime.withColumn("Date", to_timestamp("Date", "MM/dd/yyyy hh:mm:ss a"))
+
+# Change dtype values
+crime = crime.withColumn("District", crime.District.cast(IntegerType()))
+crime = crime.withColumn("Year", crime.Year.cast(IntegerType()))
+
+# Get hour and day of week
+crime = crime.withColumn('hour', hour("Date"))
+crime = crime.withColumn('day', dayofweek("Date"))
+crime = crime.drop("Date")
+
+# COMMAND ----------
+
+# Join CommAreas csv
+comm = comm.select(['AREA_NUMBE','COMMUNITY'])
+crime = crime.join(comm, col('Community Area') == col('AREA_NUMBE'), 'left')
+crime.show()
+
+# COMMAND ----------
+
+crime = crime.filter(col("COMMUNITY").isNotNull())
+crime.show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Plotting
+
+# COMMAND ----------
+
+# Plot top 10 crimes
+ptype = crime.groupby('Primary Type').count().orderBy(col("count").desc()).limit(10).toPandas()
+# ptype.to_csv("top10_crime.csv")
+fig = px.pie(ptype, values='count', names='Primary Type', title='Top 10 Crime Type', color_discrete_sequence=px.colors.sequential.RdBu)
+fig.show()
+
+# COMMAND ----------
+
+comtype = crime.groupby('COMMUNITY').count().orderBy(col("count").desc()).toPandas()
+comtype.dropna(inplace = True)
+fig = px.treemap(comtype, path=['COMMUNITY'], values=comtype['count'], height=700,
+                 title='Crime in Chicago by Community', color_discrete_sequence = px.colors.sequential.RdBu)
+fig.data[0].textinfo = 'label+text+value'
+fig.show()
+
+# COMMAND ----------
+
+fig = px.histogram(crime.toPandas(), x='Year',color='Year')
+fig.update_layout(
+        title_text='Chicago Crime by Year',
+        xaxis_title_text='Crime', 
+        yaxis_title_text='Count', 
+        bargap=0.2, 
+        bargroupgap=0.1
+    )
+fig.show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### MLlib
+
+# COMMAND ----------
+
+# Assault or Battery will surely require some sort of medical assistance
+medical = crime.withColumn("med", when(col("Primary Type") == "BATTERY",1) \
+      .when(col("Primary Type") == "ASSAULT",1) \
+      .otherwise(0))
+medical = medical.drop('Primary Type','Arrest','Domestic','AREA_NUMBE')
+medical.printSchema()
+
+# COMMAND ----------
+
+medical.filter(col("med") == 1).count()
+
+# COMMAND ----------
+
+# One-hot-encoder
+categoricalCols = [field for (field, dataType) in medical.dtypes if dataType == "string"]
+print(categoricalCols)
+
+indexOutputCols = [x + "_Index" for x in categoricalCols]
+oheOutputCols = [x + "_OHE" for x in categoricalCols]
+print(indexOutputCols)
+print(oheOutputCols)
+
+stringIndexer = StringIndexer(inputCols=categoricalCols, outputCols=indexOutputCols, handleInvalid="skip")
+oheEncoder = OneHotEncoder(inputCols=indexOutputCols, outputCols=oheOutputCols)
+
+numericCols = [field for (field, dataType) in medical.dtypes if dataType == "int"]
+print(numericCols)
+
+assemblerInputs = oheOutputCols + numericCols
+vecAssembler = VectorAssembler(inputCols=assemblerInputs, outputCol="features")
+
+# COMMAND ----------
+
+# Train Test Split
+trainDF, testDF = medical.randomSplit([.8, .2], seed=42)
+print(f"""There are {trainDF.count()} rows in the training set,
+and {testDF.count()} in the test set""")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ###Random Forest
+
+# COMMAND ----------
+
+rfc = RandomForestClassifier(labelCol="med")
+pipeline = Pipeline(stages = [stringIndexer, oheEncoder, vecAssembler, rfc])
+
+pipelineModel = pipeline.fit(trainDF)
+predDF = pipelineModel.transform(testDF)
+
+# COMMAND ----------
+
+# Evaluation
+
+evaluator = BinaryClassificationEvaluator(rawPredictionCol = 'prediction', labelCol = 'med')
+acc = evaluator.evaluate(predDF)
+ 
+print("Prediction Accuracy: ", acc)
+ 
+y_pred=predDF.select("prediction").collect()
+y_orig=predDF.select("med").collect()
+
+cm = confusion_matrix(y_orig, y_pred)
+print("Confusion Matrix:")
+print(cm)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ###Decision Tree
+
+# COMMAND ----------
+
+dtc = DecisionTreeClassifier(labelCol="med")
+pipelineDTC = Pipeline(stages = [stringIndexer, oheEncoder, vecAssembler, dtc])
+
+pipelineModelDTC = pipelineDTC.fit(trainDF)
+predDTC = pipelineModelDTC.transform(testDF)
+
+# COMMAND ----------
+
+evaluatorDTC = BinaryClassificationEvaluator(rawPredictionCol = 'prediction', labelCol = 'med')
+accDTC = evaluatorDTC.evaluate(predDTC)
+ 
+print("Prediction Accuracy: ", accDTC)
+ 
+y_predDTC=predDTC.select("prediction").collect()
+y_origDTC=predDTC.select("med").collect()
+
+cmDTC = confusion_matrix(y_origDTC, y_predDTC)
+print("Confusion Matrix:")
+print(cmDTC)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Crime Type Predicition
+
+# COMMAND ----------
+
+crime.show()
+
+# COMMAND ----------
+
+from pyspark.sql.functions import monotonically_increasing_id
+crime_id = crime.select("*").withColumn("id", monotonically_increasing_id())
+
+# COMMAND ----------
+
+from pyspark.sql import functions as f
+categories = crime_id.select("Primary Type").distinct().rdd.flatMap(lambda x: x).collect()
+
+# COMMAND ----------
+
+indexer_Type = StringIndexer(inputCol="Primary Type", outputCol = "categoryIndex")
+crime_id_Type = indexer_Type.fit(crime_id).transform(crime_id)
+crime_id_Type.show()
+
+# COMMAND ----------
+
+categories_index = crime_id_Type.select("categoryIndex").distinct().rdd.flatMap(lambda x: x).collect()
+
+# COMMAND ----------
+
+crime_id_Type_sim = crime_id_Type.drop("Year","month","day","hour","Arrest","Domestic","Primary Type","id")
+crime_id_Type_sim.show(5)
+
+# COMMAND ----------
+
+crime_id_Type_sim.count()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Crime Type Prediciton - Random Forest
+
+# COMMAND ----------
+
+# One-hot-encoder
+categoricalCols_Type = [field for (field, dataType) in crime_id_Type_sim.dtypes if dataType == "string"]
+print(categoricalCols_Type)
+
+indexOutputCols_Type = [x + "_Index" for x in categoricalCols_Type]
+oheOutputCols_Type = [x + "_OHE" for x in categoricalCols_Type]
+print(indexOutputCols_Type)
+print(oheOutputCols_Type)
+
+stringIndexer_Type = StringIndexer(inputCols=categoricalCols_Type, outputCols=indexOutputCols_Type, handleInvalid="skip")
+oheEncoder_Type = OneHotEncoder(inputCols=indexOutputCols_Type, outputCols=oheOutputCols_Type)
+
+numericCols_Type = [field for (field, dataType) in crime_id_Type_sim.dtypes if dataType == "int"]
+print(numericCols_Type)
+
+assemblerInputs_Type = oheOutputCols_Type + numericCols_Type
+vecAssembler_Type = VectorAssembler(inputCols=assemblerInputs_Type, outputCol="features")
+
+# COMMAND ----------
+
+# Train Test Split
+trainDF_Type, testDF_Type = crime_id_Type_sim.randomSplit([.8, .2], seed=42)
+print(f"""There are {trainDF_Type.count()} rows in the training set,
+and {testDF_Type.count()} in the test set""")
+
+# COMMAND ----------
+
+# Train Random Forest Model
+rfc_Type = RandomForestClassifier(labelCol="categoryIndex")
+pipeline_Type = Pipeline(stages = [stringIndexer_Type, oheEncoder_Type, vecAssembler_Type, rfc_Type])
+
+pipelineModel_Type = pipeline_Type.fit(trainDF_Type)
+predDF_Type = pipelineModel_Type.transform(testDF_Type)
+
+# COMMAND ----------
+
+# Evaluation
+
+evaluator_Type = BinaryClassificationEvaluator(rawPredictionCol = 'prediction', labelCol = 'categoryIndex')
+acc_Type = evaluator_Type.evaluate(predDF_Type)
+ 
+print("Prediction Accuracy: ", acc_Type)
+ 
+y_pred_Type=predDF_Type.select("prediction").collect()
+y_orig_Type=predDF_Type.select("categoryIndex").collect()
+
+cm_Type = multilabel_confusion_matrix(y_orig_Type, y_pred_Type, labels=categories_index )
+print("Confusion Matrix:")
+print(cm_Type)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Crime Type Prediciton - Decision Tree
+
+# COMMAND ----------
+
+# Decision Tree
+dtc_Type = DecisionTreeClassifier(labelCol="categoryIndex")
+pipelineDTC_Type = Pipeline(stages = [stringIndexer_Type, oheEncoder_Type, vecAssembler_Type, dtc_Type])
+
+pipelineModelDTC_Type = pipelineDTC_Type.fit(trainDF_Type)
+df_9 = pipelineModelDTC_Type.transform(trainDF_Type)
+predDTC_Type = pipelineModelDTC_Type.transform(testDF_Type)
+
+# COMMAND ----------
+
+# Evaluation of Decision Tree
+
+evaluatorDTC_Type = BinaryClassificationEvaluator(rawPredictionCol = 'prediction', labelCol = 'categoryIndex')
+accDTC_Type = evaluatorDTC_Type.evaluate(predDTC_Type)
+ 
+print("Prediction Accuracy: ", accDTC_Type)
+ 
+y_predDTC_Type=predDTC_Type.select("prediction").collect()
+y_origDTC_Type=predDTC_Type.select("categoryIndex").collect()
+
+cmDTC_Type = multilabel_confusion_matrix(y_origDTC_Type, y_predDTC_Type)
+print("Confusion Matrix:")
+print(cmDTC_Type)
+
+# COMMAND ----------
+
