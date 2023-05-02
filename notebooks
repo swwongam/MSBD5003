@@ -5,6 +5,12 @@
 
 # COMMAND ----------
 
+import time
+
+# COMMAND ----------
+
+start_time = time.time()
+
 # File location and type
 file_location = "/FileStore/tables/Crimes___2001_to_Present.csv"
 file_type = "csv"
@@ -37,6 +43,10 @@ comm = spark.read.format(file_type) \
   .option("sep", delimiter) \
   .load(file_location)
 
+# Time spent on reading the csv files
+csv_time = time.time()-start_time
+print("Read CSV time:" ,csv_time)
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -67,11 +77,6 @@ from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, multilabel_confusion_matrix
 
-import os
-import dash
-from dash import Dash, html, dash_table, dcc, callback
-from dash.dependencies import Output, Input
-
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -82,9 +87,19 @@ warnings.filterwarnings("ignore")
 
 # COMMAND ----------
 
+preprocess_start_time = time.time()
+
+start_time = time.time()
 print("Crime DF count - before dropping NA values", crime.count())
+count_time = time.time() - start_time
+print("Count time:",count_time)
+
 crime = crime.na.drop()
+
+start_time = time.time()
 print("Crime DF count - after dropping NA values", crime.count())
+count_time = time.time() - start_time
+print("Count time:",count_time)
 
 # COMMAND ----------
 
@@ -116,6 +131,11 @@ crime.show()
 
 crime = crime.filter(col("COMMUNITY").isNotNull())
 crime.show()
+
+# COMMAND ----------
+
+preprocess_count_time = time.time() - preprocess_start_time
+print("Data Proprocessing time: ",preprocess_count_time)
 
 # COMMAND ----------
 
@@ -212,11 +232,20 @@ and {testDF.count()} in the test set""")
 
 # COMMAND ----------
 
+rfc_start_time = time.time()
+
+# COMMAND ----------
+
 rfc = RandomForestClassifier(labelCol="med")
 pipeline = Pipeline(stages = [stringIndexer, oheEncoder, vecAssembler, rfc])
 
 pipelineModel = pipeline.fit(trainDF)
 predDF = pipelineModel.transform(testDF)
+
+# COMMAND ----------
+
+rfc_training_time = time.time() - rfc_start_time
+print("Random Forest modeling:",rfc_training_time)
 
 # COMMAND ----------
 
@@ -236,16 +265,28 @@ print(cm)
 
 # COMMAND ----------
 
+rfc_competion_time = time.time() - rfc_start_time
+print(rfc_competion_time)
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ###Decision Tree
 
 # COMMAND ----------
+
+# DBTITLE 0,Decision tree modeling
+dtc_start_time = time.time()
 
 dtc = DecisionTreeClassifier(labelCol="med")
 pipelineDTC = Pipeline(stages = [stringIndexer, oheEncoder, vecAssembler, dtc])
 
 pipelineModelDTC = pipelineDTC.fit(trainDF)
 predDTC = pipelineModelDTC.transform(testDF)
+
+dtc_training_time = time.time() - dtc_start_time
+
+print("Decision Tree model train time: ", dtc_training_time)
 
 # COMMAND ----------
 
@@ -333,6 +374,10 @@ and {testDF_Type.count()} in the test set""")
 
 # COMMAND ----------
 
+rfc_Type = RandomForestClassifier(labelCol="categoryIndex")
+
+# COMMAND ----------
+
 # Train Random Forest Model
 rfc_Type = RandomForestClassifier(labelCol="categoryIndex")
 pipeline_Type = Pipeline(stages = [stringIndexer_Type, oheEncoder_Type, vecAssembler_Type, rfc_Type])
@@ -386,6 +431,92 @@ y_origDTC_Type=predDTC_Type.select("categoryIndex").collect()
 cmDTC_Type = multilabel_confusion_matrix(y_origDTC_Type, y_predDTC_Type)
 print("Confusion Matrix:")
 print(cmDTC_Type)
+
+# COMMAND ----------
+
+performance_matirx = sqlContext.createDataFrame([
+
+    ("Loading data",csv_time),
+    ("Data pregrocesing", preprocess_count_time),
+    ("Random Forest modeling", rfc_training_time),
+    ("Decision Tree modeling", dtc_training_time),
+
+], ("Process", "Time taken (s)"))
+
+# COMMAND ----------
+
+performance_matirx.show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Time test on scikei-learn
+
+# COMMAND ----------
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from sklearn import preprocessing
+from sklearn import metrics
+from sklearn.model_selection import KFold
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import AdaBoostClassifier
+from sklearn import neighbors, tree, naive_bayes
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+import time
+
+start_time = time.time()
+df = crime.toPandas()
+end_time = time.time()
+print("Read csv Time:", end_time - start_time)
+
+
+start_time = time.time()
+df = df[['Date', 'Primary Type', 'Arrest', 'Domestic', 'District', 'Community Area', 'Year']]
+df = df.dropna()
+areas = comm.toPandas()[['AREA_NUMBE', 'COMMUNITY']]
+chi_crime = df.merge(areas, how='inner', left_on='Community Area', right_on='AREA_NUMBE').drop(['Community Area', 'AREA_NUMBE'], axis=1)
+chi_crime['DateTime'] = pd.to_datetime(chi_crime['Date'], format='%m/%d/%Y %I:%M:%S %p')
+chi_crime['Hour'] = chi_crime['DateTime'].dt.hour
+chi_crime['Day'] = chi_crime['DateTime'].dt.strftime('%A')
+chi_crime = chi_crime.drop(['Date', 'DateTime'], axis=1)
+chi_crime.head()
+Num_crimes_type = chi_crime['Primary Type'].value_counts()
+type = pd.DataFrame(data=Num_crimes_type.index, columns=["Primary Type"])
+type['values'] = Num_crimes_type.values
+end_time = time.time()
+print("Data Preprocessing Time:", end_time - start_time)
+
+medical = np.array(type['Primary Type'].loc[(type['Primary Type'] == 'BATTERY') | (type['Primary Type'] == 'ASSAULT')])
+non_medical = np.array(type['Primary Type'].loc[(type['Primary Type'] != 'BATTERY') & (type['Primary Type'] != 'ASSAULT')])
+chi_crime_med = chi_crime
+for items in medical:
+    chi_crime_med = chi_crime_med.replace({'Primary Type': {items: 'med'}})
+for items in non_medical:
+    chi_crime_med = chi_crime_med.replace({'Primary Type': {items: 'non_med'}})
+chi_crime_med = pd.get_dummies(chi_crime_med, prefix=['Community', 'Primary', 'Day'], columns=['COMMUNITY', 'Primary Type', 'Day'])
+chi_crime_med = chi_crime_med.drop(['Arrest', 'Domestic'], axis=1)
+target = chi_crime_med['Primary_med']
+chi_crime_med = chi_crime_med.drop(['Primary_med', 'Primary_non_med'], axis=1)
+crime_train, crime_test, target_train, target_test = train_test_split(chi_crime_med, target, test_size=0.2, random_state=111)
+
+start_time = time.time()
+rf = RandomForestClassifier(n_estimators=10, random_state=33)
+rf = rf.fit(crime_train, target_train)
+end_time = time.time()
+print("RF training Time:", end_time - start_time)
+
+# COMMAND ----------
+
+start_time = time.time()
+df = pd.read_csv("/dbfs/FileStore/tables/Crimes___2001_to_Present.csv")
+end_time = time.time()
+print(end_time - start_time)
 
 # COMMAND ----------
 
