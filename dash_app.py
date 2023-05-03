@@ -7,6 +7,8 @@ import os
 import dash
 from dash import Dash, html, dash_table, dcc, callback
 from dash.dependencies import Output, Input
+import dash_bootstrap_components as dbc
+from dash_bootstrap_templates import load_figure_template
 
 import pandas as pd
 import plotly.express as px
@@ -18,18 +20,16 @@ import plotly.graph_objs as go
 
 ptype = pd.read_csv('data/dash_pie_top10.csv', index_col = 0)
 community = pd.read_csv('data/dash_community.csv', index_col = 0)
-
+years = sorted(list(ptype['Year'].unique()))
 
 # ### Web App
-
+load_figure_template("darkly")
 # In[71]:
 
 
 app_name = 'Crime-Chicago'
  
-external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css']
- 
-app = dash.Dash(__name__, external_stylesheets=external_stylesheets)
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.DARKLY])
 app.title = 'Chicago Crime Analysis'
 
 
@@ -37,15 +37,18 @@ app.title = 'Chicago Crime Analysis'
 
 
 app.layout = html.Div([
-    html.Div(children='Crime'),
+    html.H1(children='Chicago Crime Analysis', style={'textAlign': 'center'}),
     html.Hr(),
-    dcc.Dropdown(id = 'select_year',
-                options = [
-                    {'label':'2007', "value":2007},
-                    {'label':'2008', "value":2008},
-                    {'label':'2009', "value":2009}
-                ], value = 2007, multi=False, clearable=False, style={"width":"50%"}), 
-    html.Div(children = [dcc.Graph(id = 'pie_chart', style={'display': 'inline-block'}), dcc.Graph(id = 'community_chart', style={'display': 'inline-block'})])
+    # dcc.Dropdown(id = 'select_year',
+    #             options = [
+    #                 {'label':'2007', "value":2007},
+    #                 {'label':'2008', "value":2008},
+    #                 {'label':'2009', "value":2009}
+    #             ], value = 2007, multi=False, clearable=False, style={"width":"50%"}), 
+    dcc.Slider(min = years[0], max = years[-1], step = 1, value = years[0], id = "select_year", marks={str(x):x for x in years}),
+    html.Div(children = 
+             [dcc.Graph(id = 'pie_chart', style={'display': 'inline-block', 'textAlign': 'center', 'width': '50%', 'height': '100%'}), 
+              dcc.Graph(id = 'community_chart', style={'display': 'inline-block', 'textAlign': 'center', 'width': '50%', 'height': '50%'})])
 ])
 
 # Pie chart
